@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScanTable Web Annotator</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="controls">
+        <input type="file" id="imageInput" accept="image/*">
+        <input type="text" id="projectName" placeholder="Nome progetto">
+        <button id="processBtn" disabled>2. Elabora Immagine</button>
+        <input type="file" id="projectInput" accept=".tblproj">
+        <button id="loadProjBtn" disabled>Apri Progetto</button>
+        <span id="status">Pronto.</span>
+    </div>
+    <div id="main">
+        <div id="canvasPanel">
+            <canvas id="tableCanvas"></canvas>
+        </div>
+        <div id="detailsPanel">
+            <h2>Dettagli Cella Selezionata</h2>
+            <label>ID Cella:</label>
+            <input type="text" id="cellId" readonly>
+            <label>Contenuto Testuale:</label>
+            <textarea id="cellContent" rows="6"></textarea>
+            <label>Tipo Cella:</label>
+            <select id="cellType">
+                <option value="standard">standard</option>
+                <option value="header">header</option>
+                <option value="data">data</option>
+                <option value="footer">footer</option>
+                <option value="other">other</option>
+            </select>
+            <button id="saveCellBtn" disabled>Salva Modifiche Cella</button>
+        </div>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>

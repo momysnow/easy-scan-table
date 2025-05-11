@@ -142,11 +142,16 @@ def process_image():
             'type': 'standard'
         })
 
+    # Converti l'immagine elaborata in bytes
+    _, processed_img_bytes = cv2.imencode(f'.{ext}', warped)
+    processed_img_bytes = processed_img_bytes.tobytes()
+
     # 4) Salva .tblproj (ZIP) in progetti/
     metadata = {'project_name': project_name, 'cells': cells_data}
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(mem_zip, 'w') as zf:
-        zf.writestr(f'image.{ext}', img_bytes)
+        zf.writestr(f'image_original.{ext}', img_bytes)
+        zf.writestr(f'image_processed.{ext}', processed_img_bytes)
         zf.writestr('metadata.json',
                     json.dumps(metadata, ensure_ascii=False, indent=2))
     mem_zip.seek(0)
@@ -155,10 +160,16 @@ def process_image():
     with open(proj_path, 'wb') as f:
         f.write(mem_zip.getvalue())
 
+    # Converti l'immagine elaborata in base64 per il client
+    b64 = base64.b64encode(processed_img_bytes).decode('utf-8')
+    data_url = f'data:image/{ext};base64,{b64}'
+
     # 5) Rispondi al client
     return jsonify({
         'project_name': project_name,
-        'cells': cells_data
+        'cells': cells_data,
+        'image_data': data_url,
+        'original_filename': file.filename
     })
 
 
@@ -172,13 +183,25 @@ def load_project():
     try:
         with zipfile.ZipFile(mem) as zf:
             meta = json.loads(zf.read('metadata.json'))
-            img_name = next(n for n in zf.namelist() if n.startswith('image.'))
-            img_bytes = zf.read(img_name)
+            # Cerca prima l'immagine elaborata, se non c'è usa l'originale
+            file_list = zf.namelist()
+            processed_img_name = next((n for n in file_list if n.startswith('image_processed.')), None)
+
+            if processed_img_name:
+                img_bytes = zf.read(processed_img_name)
+                ext = processed_img_name.rsplit('.',1)[1]
+            else:
+                # Compatibilità con vecchi progetti
+                img_name = next((n for n in file_list if n.startswith('image_original.') or n.startswith('image.')), None)
+                if not img_name:
+                    return jsonify({'error': 'Immagine mancante nel progetto'}), 400
+                img_bytes = zf.read(img_name)
+                ext = img_name.rsplit('.',1)[1]
     except Exception as e:
         return jsonify({'error': 'ZIP non valido o metadata mancante'}), 400
 
     # Base64-encode per il client
-    mime = 'image/' + img_name.rsplit('.',1)[1]
+    mime = f'image/{ext}'
     b64 = base64.b64encode(img_bytes).decode('utf-8')
     data_url = f'data:{mime};base64,{b64}'
 

@@ -3,6 +3,8 @@ import io
 import json
 import base64
 import zipfile
+import time
+import numpy as np
 
 from flask import Flask, request, jsonify, render_template
 from werkzeug.utils import secure_filename
@@ -64,6 +66,44 @@ def is_valid_box(w, h):
     aspect_ratio = max(w/h, h/w) if h and w else float('inf')
     return aspect_ratio < 25
 
+def is_cell_filled(cell_img, fill_threshold=0.02):
+    """
+    Ritorna True se la cella contiene un qualsiasi segno (croce, pallino, X, testo, ecc.),
+    False se invece è sostanzialmente vuota.
+
+    Args:
+      cell_img: immagine della cella in formato numpy array (grayscale)
+      fill_threshold (float): soglia minima di percentuale di pixel "neri" per considerare la cella piena.
+                              Default = 0.02 → 2% del totale dei pixel.
+
+    Returns:
+      bool, float: (è piena?, rapporto di riempimento)
+    """
+    if cell_img is None or cell_img.size == 0:
+        return False, 0.0
+
+    # Assicurati che l'immagine sia in scala di grigi
+    if len(cell_img.shape) > 2:
+        gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = cell_img.copy()
+
+    # Binarizza invertendo (i segni scuri diventano bianchi)
+    # Usiamo Otsu per adattarsi automaticamente alle variazioni di luminosità
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Piccole aperture per rimuovere rumore
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
+
+    # Calcola la percentuale di pixel "bianchi" (cioè i segni)
+    n_filled = cv2.countNonZero(bw)
+    total_pixels = bw.shape[0] * bw.shape[1]
+    fill_ratio = n_filled / total_pixels if total_pixels > 0 else 0
+
+    # Confronta con la soglia
+    return fill_ratio > fill_threshold, fill_ratio
+
 # --- ROUTES ---
 @app.route('/')
 def index():
@@ -75,6 +115,9 @@ def process_image():
     project_name = request.form.get('project_name')
     if not project_name:
         return jsonify({'error': 'Nome progetto mancante'}), 400
+
+    # Controlla se è un master
+    is_master = request.form.get('is_master') == 'true'
 
     # 2) Leggi immagine dal form in memoria
     file = request.files.get('image')
@@ -139,7 +182,7 @@ def process_image():
             'id': f'cell_{i}',
             'coords': [int(x), int(y), int(w), int(h)],
             'text': text,
-            'type': 'standard'
+            'type': 'data'  # Imposta 'data' come tipo di default
         })
 
     # Converti l'immagine elaborata in bytes
@@ -147,7 +190,12 @@ def process_image():
     processed_img_bytes = processed_img_bytes.tobytes()
 
     # 4) Salva .tblproj (ZIP) in progetti/
-    metadata = {'project_name': project_name, 'cells': cells_data}
+    metadata = {
+        'project_name': project_name,
+        'cells': cells_data,
+        'is_master': is_master
+    }
+
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(mem_zip, 'w') as zf:
         zf.writestr(f'image_original.{ext}', img_bytes)
@@ -169,7 +217,8 @@ def process_image():
         'project_name': project_name,
         'cells': cells_data,
         'image_data': data_url,
-        'original_filename': file.filename
+        'original_filename': file.filename,
+        'is_master': is_master
     })
 
 
@@ -208,7 +257,9 @@ def load_project():
     return jsonify({
         'project_name': meta.get('project_name', ''),
         'cells': meta.get('cells', []),
-        'image_data': data_url
+        'image_data': data_url,
+        'is_master': meta.get('is_master', False),
+        'header_associations': meta.get('header_associations', {})
     })
 
 
@@ -217,26 +268,197 @@ def save_annotations():
     data = request.get_json()
     project_name = data.get('project_name')
     annotations = data.get('annotations')
+    header_associations = data.get('header_associations', {})
 
     proj_path = os.path.join(PROJECTS_FOLDER, f'{project_name}.tblproj')
     if not os.path.exists(proj_path):
         return jsonify({'success': False, 'error': 'Progetto non trovato'}), 404
 
-    # Riapri ZIP, conserva immagine, aggiorna solo metadata
+    # Riapri ZIP, conserva immagini, aggiorna solo metadata
     with zipfile.ZipFile(proj_path, 'r') as zf:
-        img_name = next(n for n in zf.namelist() if n.startswith('image.'))
-        img_bytes = zf.read(img_name)
+        # Trova tutte le immagini nel progetto
+        img_files = [n for n in zf.namelist() if n.startswith('image_')]
+        img_data = {name: zf.read(name) for name in img_files}
 
-    metadata = {'project_name': project_name, 'cells': annotations}
+        # Se non ci sono immagini con prefisso image_, cerca il vecchio formato
+        if not img_files:
+            img_name = next((n for n in zf.namelist() if n.startswith('image.')), None)
+            if img_name:
+                img_data = {img_name: zf.read(img_name)}
+
+        # Leggi i metadati esistenti per preservare eventuali flag
+        try:
+            existing_meta = json.loads(zf.read('metadata.json'))
+            is_master = existing_meta.get('is_master', False)
+        except:
+            is_master = False
+
+    # Assicurati che le annotazioni mantengano tutte le proprietà originali
+    # incluse le coordinate e altri metadati
+    metadata = {
+        'project_name': project_name,
+        'cells': annotations,
+        'is_master': is_master,
+        'header_associations': header_associations
+    }
+
+    # Crea un nuovo ZIP in memoria
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(mem_zip, 'w') as zf:
-        zf.writestr(img_name, img_bytes)
+        # Scrivi tutte le immagini originali
+        for img_name, img_bytes in img_data.items():
+            zf.writestr(img_name, img_bytes)
+
+        # Scrivi il metadata aggiornato
         zf.writestr('metadata.json',
                     json.dumps(metadata, ensure_ascii=False, indent=2))
+
+    # Salva il file progetto
     with open(proj_path, 'wb') as f:
         f.write(mem_zip.getvalue())
 
     return jsonify({'success': True})
+
+
+@app.route('/api/save_master', methods=['POST'])
+def save_master():
+    data = request.get_json()
+    project_name = data.get('project_name')
+    cells = data.get('cells')
+    header_associations = data.get('header_associations', {})
+
+    if not project_name or not cells:
+        return jsonify({'success': False, 'error': 'Dati incompleti'}), 400
+
+    # Percorso del file master
+    master_path = os.path.join(PROJECTS_FOLDER, 'master_templates')
+    os.makedirs(master_path, exist_ok=True)
+
+    # Salva il master come JSON
+    master_file = os.path.join(master_path, f'{project_name}_master.json')
+    with open(master_file, 'w', encoding='utf-8') as f:
+        json.dump({
+            'project_name': project_name,
+            'cells': cells,
+            'header_associations': header_associations,
+            'created_at': time.strftime('%Y-%m-%d %H:%M:%S')
+        }, f, ensure_ascii=False, indent=2)
+
+    return jsonify({'success': True})
+
+
+@app.route('/api/list_masters', methods=['GET'])
+def list_masters():
+    # Percorso dei file master
+    master_path = os.path.join(PROJECTS_FOLDER, 'master_templates')
+
+    if not os.path.exists(master_path):
+        return jsonify({'masters': []})
+
+    # Lista tutti i file master
+    master_files = [f for f in os.listdir(master_path) if f.endswith('_master.json')]
+    masters = []
+
+    for file in master_files:
+        try:
+            with open(os.path.join(master_path, file), 'r', encoding='utf-8') as f:
+                master_data = json.load(f)
+                masters.append({
+                    'id': file.replace('_master.json', ''),
+                    'name': master_data.get('project_name', 'Senza nome'),
+                    'created_at': master_data.get('created_at', '')
+                })
+        except:
+            continue
+
+    return jsonify({'masters': masters})
+
+
+@app.route('/api/get_master/<master_id>', methods=['GET'])
+def get_master(master_id):
+    # Percorso del file master
+    master_path = os.path.join(PROJECTS_FOLDER, 'master_templates')
+    master_file = os.path.join(master_path, f'{master_id}_master.json')
+
+    if not os.path.exists(master_file):
+        return jsonify({'error': 'Master non trovato'}), 404
+
+    try:
+        with open(master_file, 'r', encoding='utf-8') as f:
+            master_data = json.load(f)
+            return jsonify(master_data)
+    except:
+        return jsonify({'error': 'Errore nella lettura del master'}), 500
+
+
+@app.route('/api/test_boolean_cell', methods=['POST'])
+def test_boolean_cell():
+    """
+    Testa se una cella è piena o vuota in base alla soglia specificata.
+
+    Parametri:
+    - project_name: nome del progetto
+    - cell_id: ID della cella da testare
+    - threshold: soglia di riempimento (0.0-1.0)
+
+    Ritorna:
+    - is_filled: true/false
+    - fill_ratio: percentuale di riempimento
+    """
+    data = request.get_json()
+    project_name = data.get('project_name')
+    cell_id = data.get('cell_id')
+    threshold = float(data.get('threshold', 0.02))
+
+    if not project_name or not cell_id:
+        return jsonify({'error': 'Parametri mancanti'}), 400
+
+    # Carica il progetto
+    proj_path = os.path.join(PROJECTS_FOLDER, f'{project_name}.tblproj')
+    if not os.path.exists(proj_path):
+        return jsonify({'error': 'Progetto non trovato'}), 404
+
+    try:
+        with zipfile.ZipFile(proj_path, 'r') as zf:
+            # Carica i metadati
+            meta = json.loads(zf.read('metadata.json'))
+            cells = meta.get('cells', [])
+
+            # Trova la cella richiesta
+            cell = next((c for c in cells if c['id'] == cell_id), None)
+            if not cell:
+                return jsonify({'error': 'Cella non trovata'}), 404
+
+            # Carica l'immagine
+            img_name = next((n for n in zf.namelist() if n.startswith('image_processed.')), None)
+            if not img_name:
+                img_name = next((n for n in zf.namelist() if n.startswith('image_original.') or n.startswith('image.')), None)
+
+            if not img_name:
+                return jsonify({'error': 'Immagine non trovata nel progetto'}), 404
+
+            # Carica l'immagine in memoria
+            img_bytes = zf.read(img_name)
+            np_arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            # Estrai le coordinate della cella
+            x, y, w, h = cell['coords']
+
+            # Ritaglia la cella
+            cell_img = img[y:y+h, x:x+w]
+
+            # Verifica se la cella è piena
+            is_filled, fill_ratio = is_cell_filled(cell_img, threshold)
+
+            return jsonify({
+                'is_filled': is_filled,
+                'fill_ratio': fill_ratio,
+                'threshold': threshold
+            })
+
+    except Exception as e:
+        return jsonify({'error': f'Errore durante il test: {str(e)}'}), 500
 
 
 if __name__ == '__main__':

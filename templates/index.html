@@ -7,18 +7,74 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div id="controls">
-        <input type="file" id="imageInput" accept="image/*">
-        <input type="text" id="projectName" placeholder="Nome progetto">
-        <button id="processBtn" disabled>2. Elabora Immagine</button>
-        <input type="file" id="projectInput" accept=".tblproj">
-        <button id="loadProjBtn" disabled>Apri Progetto</button>
-        <button id="resetViewBtn" title="Reimposta zoom e posizione">Reset Vista</button>
-        <span id="status">Pronto.</span>
-    </div>
+    <header>
+        <h1>ScanTable</h1>
+        <div class="app-description">Estrazione e gestione dati da tabelle</div>
+    </header>
+
+    <nav id="controls">
+        <div class="nav-left">
+            <!-- Dropdown File -->
+            <div class="dropdown">
+                <button class="dropdown-btn">File</button>
+                <div class="dropdown-content">
+                    <div class="dropdown-item" id="newFileBtn">
+                        <span>Nuovo</span>
+                        <input type="file" id="imageInput" accept="image/*" class="hidden-input">
+                    </div>
+                    <div class="dropdown-item" id="openFileBtn">
+                        <span>Apri</span>
+                        <input type="file" id="projectInput" accept=".tblproj" class="hidden-input">
+                    </div>
+                    <div class="dropdown-item" id="createMasterBtn">
+                        <span>Crea Master</span>
+                        <input type="file" id="masterInput" accept="image/*" class="hidden-input">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Nome Progetto -->
+            <div class="project-name-container">
+                <span id="projectNameDisplay" class="editable-text">Nessun progetto</span>
+                <input type="text" id="projectName" class="edit-project-name" placeholder="Nome progetto">
+            </div>
+        </div>
+
+        <div class="nav-right">
+            <!-- Pulsanti azione -->
+            <button id="exportJsonBtn" disabled>Esporta JSON</button>
+            <button id="selectMasterBtn">Seleziona Master</button>
+
+            <!-- Modal per la selezione del master -->
+            <div id="masterSelectionModal" class="modal hidden">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Seleziona Master Template</h3>
+                        <span class="close-modal">&times;</span>
+                    </div>
+                    <div class="modal-body">
+                        <div id="mastersList" class="masters-list">
+                            <!-- Lista dei master disponibili -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <button id="processBtn" disabled class="hidden">Elabora</button>
+
+            <!-- Status -->
+            <span id="status">Pronto.</span>
+        </div>
+    </nav>
+
     <div id="main">
         <div id="canvasPanel">
             <canvas id="tableCanvas"></canvas>
+            <button id="resetViewBtn" class="canvas-control" title="Reimposta zoom e posizione">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                    <path d="M3 3v5h5"></path>
+                </svg>
+            </button>
         </div>
         <div id="detailsPanel">
             <h2>Dettagli Cella Selezionata</h2>
@@ -28,12 +84,65 @@
             <textarea id="cellContent" rows="6"></textarea>
             <label>Tipo Cella:</label>
             <select id="cellType">
-                <option value="standard">standard</option>
-                <option value="header">header</option>
                 <option value="data">data</option>
-                <option value="footer">footer</option>
+                <option value="header">header</option>
                 <option value="other">other</option>
+                <option value="null">null</option>
+                <option value="boolean">boolean</option>
             </select>
+
+            <div id="headerAssociationPanel" class="hidden">
+                <label>Celle associate a questo header:</label>
+                <div class="association-controls">
+                    <div class="data-cells-input-container">
+                        <input type="text" id="dataCellInput" list="dataCellsList" placeholder="Cerca celle data...">
+                        <datalist id="dataCellsList">
+                            <!-- Le opzioni verranno popolate dinamicamente -->
+                        </datalist>
+                        <button id="addCellBtn">Aggiungi</button>
+                    </div>
+                    <div class="selected-cells-container">
+                        <label>Celle selezionate:</label>
+                        <div class="selected-cells-tags" id="selectedCellsTags">
+                            <!-- I tag delle celle selezionate verranno aggiunti qui -->
+                        </div>
+                    </div>
+                </div>
+                <button id="saveAssociationsBtn" class="save-associations-btn">Salva Associazioni</button>
+            </div>
+
+            <div id="booleanConfigPanel" class="hidden">
+                <label>Configurazione cella boolean:</label>
+                <div class="boolean-config">
+                    <div class="threshold-container">
+                        <label for="fillThreshold">Soglia di riempimento (%):</label>
+                        <input type="range" id="fillThreshold" min="1" max="50" value="2" step="1">
+                        <span id="thresholdValue">2%</span>
+                    </div>
+                    <div class="boolean-values">
+                        <div class="boolean-value-container">
+                            <label for="trueValue">Valore se piena:</label>
+                            <input type="text" id="trueValue" value="true">
+                        </div>
+                        <div class="boolean-value-container">
+                            <label for="falseValue">Valore se vuota:</label>
+                            <input type="text" id="falseValue" value="false">
+                        </div>
+                    </div>
+                    <button id="testBooleanBtn" class="test-boolean-btn">Testa rilevamento</button>
+                    <div id="booleanTestResult" class="boolean-test-result hidden">
+                        <div class="test-result-container">
+                            <span class="result-label">Risultato:</span>
+                            <span id="testResultValue"></span>
+                        </div>
+                        <div class="fill-ratio-container">
+                            <span class="ratio-label">Densità pixel:</span>
+                            <span id="fillRatioValue"></span>
+                        </div>
+                    </div>
+                </div>
+                <button id="saveBooleanConfigBtn" class="save-boolean-config-btn">Salva Configurazione</button>
+            </div>
             <button id="saveCellBtn" disabled>Salva Modifiche Cella</button>
         </div>
     </div>
